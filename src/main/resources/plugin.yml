@@ -8,7 +8,7 @@ description: Random item race plugin for Paper 26.2
 commands:
   itemrace:
     description: ItemRace 게임을 관리합니다.
-    usage: /itemrace <start|stop|status>
+    usage: /itemrace <start|stop|status|score|hint|reloadpack>
     aliases: [ir]
     permission: itemrace.admin
 
