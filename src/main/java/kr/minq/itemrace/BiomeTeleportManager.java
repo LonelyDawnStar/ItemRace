@@ -35,6 +35,8 @@ import java.util.UUID;
 final class BiomeTeleportManager implements Listener {
 
     private static final int DEFAULT_COOLDOWN_SECONDS = 300;
+    // 이전 구현과의 빌드 호환용 상수. 새 코드는 cooldownSeconds를 사용한다.
+    private static final long DEFAULT_COOLDOWN_MILLIS = DEFAULT_COOLDOWN_SECONDS * 1000L;
     private static final long SPECTATOR_MILLIS = 10_000L;
     private static final long SPECTATOR_TICKS = 20L * 10L;
     private static final int SEARCH_RADIUS = 12_000;
@@ -153,7 +155,6 @@ final class BiomeTeleportManager implements Listener {
         Player player = event.getPlayer();
         if (!player.isSneaking()) return;
         if (!enabled || !raceActive || !plugin.isItemRaceParticipant(player.getUniqueId())) return;
-
         event.setCancelled(true);
         openMenu(player);
     }
@@ -163,7 +164,6 @@ final class BiomeTeleportManager implements Listener {
         if (!(event.getInventory().getHolder() instanceof BiomeMenuHolder holder)) return;
         event.setCancelled(true);
         if (!(event.getWhoClicked() instanceof Player player)) return;
-
         BiomeOption option = holder.optionsBySlot().get(event.getRawSlot());
         if (option == null) return;
         player.closeInventory();
@@ -205,7 +205,6 @@ final class BiomeTeleportManager implements Listener {
         BiomeMenuHolder holder = new BiomeMenuHolder();
         Inventory inventory = Bukkit.createInventory(holder, 27, title);
         holder.inventory = inventory;
-
         int[] slots = {10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25};
         for (int i = 0; i < options.size() && i < slots.length; i++) {
             BiomeOption option = options.get(i);
@@ -238,7 +237,6 @@ final class BiomeTeleportManager implements Listener {
             player.sendMessage(ChatColor.RED + "아직 바이옴 텔레포트 쿨타임입니다.");
             return;
         }
-
         World world = player.getWorld();
         if (world.getEnvironment() != option.environment()) {
             player.sendMessage(ChatColor.RED + "현재 차원과 선택한 바이옴의 차원이 다릅니다.");
@@ -246,14 +244,11 @@ final class BiomeTeleportManager implements Listener {
         }
 
         player.sendMessage(ChatColor.YELLOW + option.displayName() + " 바이옴을 찾는 중입니다. 잠시 멈출 수 있습니다.");
-        BiomeSearchResult result = world.locateNearestBiome(
-                player.getLocation(), SEARCH_RADIUS, 32, 64, option.biome()
-        );
+        BiomeSearchResult result = world.locateNearestBiome(player.getLocation(), SEARCH_RADIUS, 32, 64, option.biome());
         if (result == null) {
             player.sendMessage(ChatColor.RED + "반경 " + SEARCH_RADIUS + "블록 안에서 해당 바이옴을 찾지 못했습니다.");
             return;
         }
-
         Location target = findSafeLocation(world, result.getLocation());
         if (target == null) {
             player.sendMessage(ChatColor.RED + "해당 바이옴에서 안전한 이동 위치를 찾지 못했습니다.");
@@ -264,8 +259,7 @@ final class BiomeTeleportManager implements Listener {
         long now = System.currentTimeMillis();
         cooldownUntil.put(uuid, now + cooldownSeconds * 1000L);
         spectatorUntil.put(uuid, now + SPECTATOR_MILLIS);
-        GameMode previous = player.getGameMode();
-        previousModes.put(uuid, previous);
+        previousModes.put(uuid, player.getGameMode());
         BukkitTask old = restoreTasks.remove(uuid);
         if (old != null) old.cancel();
 
@@ -293,8 +287,7 @@ final class BiomeTeleportManager implements Listener {
         if (!enabled || !raceActive) return;
         for (Map.Entry<UUID, BossBar> entry : statusBars.entrySet()) {
             Player player = Bukkit.getPlayer(entry.getKey());
-            if (player == null || !player.isOnline()) continue;
-            updateStatusBar(player, entry.getValue());
+            if (player != null && player.isOnline()) updateStatusBar(player, entry.getValue());
         }
     }
 
@@ -308,7 +301,6 @@ final class BiomeTeleportManager implements Listener {
             bar.progress(Math.max(0.0f, Math.min(1.0f, spectatorLeft / (float) SPECTATOR_MILLIS)));
             return;
         }
-
         long cooldownLeft = remainingCooldownMillis(player);
         if (cooldownLeft > 0L) {
             int seconds = (int) ((cooldownLeft + 999L) / 1000L);
@@ -323,12 +315,7 @@ final class BiomeTeleportManager implements Listener {
     }
 
     private BossBar createStatusBar() {
-        return BossBar.bossBar(
-                Component.text("바이옴 TP · 사용 가능 (Shift+F)"),
-                1.0f,
-                BossBar.Color.BLUE,
-                BossBar.Overlay.PROGRESS
-        );
+        return BossBar.bossBar(Component.text("바이옴 TP · 사용 가능 (Shift+F)"), 1.0f, BossBar.Color.BLUE, BossBar.Overlay.PROGRESS);
     }
 
     private void restoreAllPlayers() {
@@ -344,7 +331,6 @@ final class BiomeTeleportManager implements Listener {
     private Location findSafeLocation(World world, Location found) {
         int x = found.getBlockX();
         int z = found.getBlockZ();
-
         if (world.getEnvironment() == World.Environment.NORMAL) {
             int y = world.getHighestBlockYAt(x, z) + 1;
             Location location = new Location(world, x + 0.5, y, z + 0.5);
@@ -360,7 +346,6 @@ final class BiomeTeleportManager implements Listener {
             }
             return null;
         }
-
         int centerY = Math.max(world.getMinHeight() + 2, Math.min(world.getMaxHeight() - 3, found.getBlockY()));
         for (int distance = 0; distance < world.getMaxHeight(); distance++) {
             int[] candidates = {centerY + distance, centerY - distance};
@@ -377,8 +362,7 @@ final class BiomeTeleportManager implements Listener {
         Block feet = location.getBlock();
         Block head = feet.getRelative(0, 1, 0);
         Block ground = feet.getRelative(0, -1, 0);
-        return feet.isPassable() && head.isPassable() && ground.getType().isSolid()
-                && ground.getType() != Material.MAGMA_BLOCK;
+        return feet.isPassable() && head.isPassable() && ground.getType().isSolid() && ground.getType() != Material.MAGMA_BLOCK;
     }
 
     private long remainingCooldownMillis(Player player) {
@@ -388,7 +372,7 @@ final class BiomeTeleportManager implements Listener {
     private String formatDuration(int totalSeconds) {
         int minutes = totalSeconds / 60;
         int seconds = totalSeconds % 60;
-        return minutes > 0 ? String.format("%d:%02d", minutes, seconds) : seconds + "초";
+        return minutes > 0 ? minutes + "분 " + seconds + "초" : seconds + "초";
     }
 
     private List<BiomeOption> overworldOptions() {
@@ -418,20 +402,12 @@ final class BiomeTeleportManager implements Listener {
         );
     }
 
-    private record BiomeOption(String displayName, Biome biome, Material icon, World.Environment environment) {
-    }
+    private record BiomeOption(String displayName, Biome biome, Material icon, World.Environment environment) {}
 
     private static final class BiomeMenuHolder implements InventoryHolder {
         private final Map<Integer, BiomeOption> optionsBySlot = new HashMap<>();
         private Inventory inventory;
-
-        Map<Integer, BiomeOption> optionsBySlot() {
-            return optionsBySlot;
-        }
-
-        @Override
-        public Inventory getInventory() {
-            return inventory;
-        }
+        Map<Integer, BiomeOption> optionsBySlot() { return optionsBySlot; }
+        @Override public Inventory getInventory() { return inventory; }
     }
 }
