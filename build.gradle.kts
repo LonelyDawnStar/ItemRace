@@ -93,6 +93,14 @@ tasks {
                 )
             }
 
+            if (!source.contains("boolean isItemRaceParticipant(UUID uuid)")) {
+                replaceOnce(
+                    "participant bridge fallback",
+                    "    private void sendUsage(CommandSender sender, String label) {",
+                    "    boolean isItemRaceParticipant(UUID uuid) {\n        return running && participants.contains(uuid);\n    }\n\n    private void sendUsage(CommandSender sender, String label) {"
+                )
+            }
+
             itemRaceSource.writeText(source, Charsets.UTF_8)
         }
     }
