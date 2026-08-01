@@ -18,6 +18,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Show checked out revision
+        run: |
+          git rev-parse HEAD
+          grep -n "DEFAULT_COOLDOWN\|cooldownSeconds" src/main/java/kr/minq/itemrace/BiomeTeleportManager.java || true
+
       - name: Set up Java 25
         uses: actions/setup-java@v4
         with:
@@ -28,9 +33,6 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.1.0'
-
-      - name: Patch biome teleport cooldown
-        run: python3 scripts/patch_biome_cooldown.py
 
       - name: Build plugin
         run: gradle clean build --stacktrace
