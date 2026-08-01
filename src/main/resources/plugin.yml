@@ -4,3 +4,15 @@ main: kr.minq.itemrace.ItemRacePlugin
 api-version: '26.2'
 author: LonelyDawnStar
 description: Random item race plugin for Paper 26.2
+
+commands:
+  itemrace:
+    description: ItemRace 게임을 관리합니다.
+    usage: /itemrace <start|stop|status>
+    aliases: [ir]
+    permission: itemrace.admin
+
+permissions:
+  itemrace.admin:
+    description: ItemRace 관리자 명령어를 사용할 수 있습니다.
+    default: op
