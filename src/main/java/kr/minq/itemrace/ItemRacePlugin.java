@@ -44,12 +44,14 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
     private Material currentTarget;
     private BukkitTask inventoryScanner;
     private BossBar targetBossBar;
-    private ResourcePackNameManager nameManager;
+    private ResourcePackNameManager resourcePackNames;
+    private KoreanNameManager koreanNames;
 
     @Override
     public void onEnable() {
-        nameManager = new ResourcePackNameManager(this);
-        nameManager.load();
+        resourcePackNames = new ResourcePackNameManager(this);
+        koreanNames = new KoreanNameManager(this);
+        reloadNameData();
 
         selectableMaterials = Arrays.stream(Material.values())
                 .filter(Material::isItem)
@@ -66,7 +68,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
 
         command.setExecutor(this);
         inventoryScanner = Bukkit.getScheduler().runTaskTimer(this, this::scanInventories, 5L, 5L);
-        getLogger().info("ItemRace 0.5.0 enabled successfully. Selectable items: " + selectableMaterials.size());
+        getLogger().info("ItemRace 0.6.0 enabled successfully. Selectable items: " + selectableMaterials.size());
     }
 
     @Override
@@ -96,7 +98,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             case "status" -> showStatus(sender);
             case "score", "scores" -> showScores(sender);
             case "hint" -> handleHint(sender, args);
-            case "reloadpack" -> reloadResourcePack(sender);
+            case "reloadpack", "reloadnames" -> reloadNames(sender);
             default -> {
                 sendUsage(sender, label);
                 yield true;
@@ -161,7 +163,6 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             sender.sendMessage(ChatColor.YELLOW + "ItemRace 상태: " + ChatColor.RED + "중지됨");
             return true;
         }
-
         sender.sendMessage(ChatColor.YELLOW + "ItemRace 상태: " + ChatColor.GREEN + "진행 중");
         sender.sendMessage(ChatColor.YELLOW + "현재 목표: " + ChatColor.AQUA + displayTargetName());
         sender.sendMessage(ChatColor.YELLOW + "현재 힌트: " + ChatColor.WHITE + renderHint());
@@ -174,10 +175,8 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             sender.sendMessage(ChatColor.GRAY + "아직 참가자나 점수가 없습니다.");
             return true;
         }
-
         sortedScores().forEach(entry -> sender.sendMessage(
-                ChatColor.YELLOW + playerName(entry.getKey())
-                        + ChatColor.WHITE + ": "
+                ChatColor.YELLOW + playerName(entry.getKey()) + ChatColor.WHITE + ": "
                         + ChatColor.AQUA + entry.getValue() + "점"
         ));
         return true;
@@ -217,25 +216,31 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         return true;
     }
 
-    private boolean reloadResourcePack(CommandSender sender) {
-        nameManager.load();
-        sender.sendMessage(nameManager.isLoaded()
-                ? ChatColor.GREEN + "리소스팩 이름을 다시 불러왔습니다."
-                : ChatColor.RED + "리소스팩 ZIP을 불러오지 못했습니다.");
+    private boolean reloadNames(CommandSender sender) {
+        reloadNameData();
+        sender.sendMessage(ChatColor.GREEN + "리소스팩 이름과 한글 이름을 다시 불러왔습니다.");
+        sender.sendMessage(ChatColor.GRAY + "리소스팩: " + (resourcePackNames.isLoaded() ? "로드됨" : "없음")
+                + ", 한글 이름: " + (koreanNames.isLoaded() ? "로드됨" : "없음"));
         if (running) {
+            resetHint();
             updateGameUi();
+            sendHintToParticipants();
             broadcastTarget("현재 목표");
         }
         return true;
     }
 
+    private void reloadNameData() {
+        resourcePackNames.load();
+        koreanNames.load();
+        koreanNames.writeCache(resourcePackNames);
+    }
+
     private void scanInventories() {
         if (!running || resolvingRound || currentTarget == null) return;
-
         for (UUID uuid : participants) {
             Player player = Bukkit.getPlayer(uuid);
             if (player == null || !player.isOnline()) continue;
-
             int now = countMaterial(player, currentTarget);
             int baseline = roundBaselines.getOrDefault(uuid, 0);
             if (now > baseline) {
@@ -308,12 +313,9 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
                 BossBar.Color.BLUE,
                 BossBar.Overlay.PROGRESS
         );
-
         for (UUID uuid : participants) {
             Player player = Bukkit.getPlayer(uuid);
-            if (player != null && player.isOnline()) {
-                player.showBossBar(targetBossBar);
-            }
+            if (player != null && player.isOnline()) player.showBossBar(targetBossBar);
         }
     }
 
@@ -327,7 +329,6 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
     private void updateScoreboards() {
         ScoreboardManager manager = Bukkit.getScoreboardManager();
         if (manager == null) return;
-
         List<Map.Entry<UUID, Integer>> ranking = sortedScores();
 
         for (UUID viewerId : participants) {
@@ -335,11 +336,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             if (viewer == null || !viewer.isOnline()) continue;
 
             Scoreboard board = manager.getNewScoreboard();
-            Objective objective = board.registerNewObjective(
-                    "itemrace",
-                    Criteria.DUMMY,
-                    Component.text("ItemRace")
-            );
+            Objective objective = board.registerNewObjective("itemrace", Criteria.DUMMY, Component.text("ItemRace"));
             objective.setDisplaySlot(DisplaySlot.SIDEBAR);
 
             int line = 15;
@@ -349,31 +346,22 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             int shown = 0;
             for (Map.Entry<UUID, Integer> entry : ranking) {
                 if (shown >= 10 || line <= 0) break;
-                String name = playerName(entry.getKey());
-                String scoreLine = ChatColor.WHITE + trimName(name, 12)
-                        + ChatColor.GRAY + " : "
-                        + ChatColor.AQUA + entry.getValue();
+                String scoreLine = ChatColor.WHITE + trimName(playerName(entry.getKey()), 12)
+                        + ChatColor.GRAY + " : " + ChatColor.AQUA + entry.getValue();
                 objective.getScore(scoreLine).setScore(line--);
                 shown++;
             }
-
             viewer.setScoreboard(board);
         }
     }
 
     private void clearGameUi() {
         ScoreboardManager manager = Bukkit.getScoreboardManager();
-
         for (UUID uuid : participants) {
             Player player = Bukkit.getPlayer(uuid);
             if (player == null || !player.isOnline()) continue;
-
-            if (targetBossBar != null) {
-                player.hideBossBar(targetBossBar);
-            }
-            if (manager != null) {
-                player.setScoreboard(manager.getMainScoreboard());
-            }
+            if (targetBossBar != null) player.hideBossBar(targetBossBar);
+            if (manager != null) player.setScoreboard(manager.getMainScoreboard());
         }
         targetBossBar = null;
     }
@@ -386,29 +374,22 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         int[] codePoints = actualTargetName().codePoints().toArray();
         List<Integer> hidden = new ArrayList<>();
         for (int index = 0; index < codePoints.length; index++) {
-            if (!Character.isWhitespace(codePoints[index]) && !revealedHintIndexes.contains(index)) {
-                hidden.add(index);
-            }
+            if (!Character.isWhitespace(codePoints[index]) && !revealedHintIndexes.contains(index)) hidden.add(index);
         }
-
         for (int i = 0; i < count && !hidden.isEmpty(); i++) {
-            int picked = random.nextInt(hidden.size());
-            revealedHintIndexes.add(hidden.remove(picked));
+            revealedHintIndexes.add(hidden.remove(random.nextInt(hidden.size())));
         }
     }
 
     private void revealAllHintCharacters() {
         int[] codePoints = actualTargetName().codePoints().toArray();
         for (int index = 0; index < codePoints.length; index++) {
-            if (!Character.isWhitespace(codePoints[index])) {
-                revealedHintIndexes.add(index);
-            }
+            if (!Character.isWhitespace(codePoints[index])) revealedHintIndexes.add(index);
         }
     }
 
     private String renderHint() {
         if (currentTarget == null) return "";
-
         int[] codePoints = actualTargetName().codePoints().toArray();
         StringBuilder result = new StringBuilder();
         for (int index = 0; index < codePoints.length; index++) {
@@ -416,11 +397,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             if (Character.isWhitespace(codePoint)) {
                 result.append("   ");
             } else {
-                if (revealedHintIndexes.contains(index)) {
-                    result.appendCodePoint(codePoint);
-                } else {
-                    result.append('□');
-                }
+                result.append(revealedHintIndexes.contains(index) ? new String(Character.toChars(codePoint)) : "□");
                 result.append(' ');
             }
         }
@@ -431,19 +408,14 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         Component hint = Component.text("힌트: " + renderHint());
         for (UUID uuid : participants) {
             Player player = Bukkit.getPlayer(uuid);
-            if (player != null && player.isOnline()) {
-                player.sendActionBar(hint);
-            }
+            if (player != null && player.isOnline()) player.sendActionBar(hint);
         }
     }
 
     private List<Map.Entry<UUID, Integer>> sortedScores() {
         List<Map.Entry<UUID, Integer>> ranking = new ArrayList<>(scores.entrySet());
-        ranking.sort(
-                Comparator.<Map.Entry<UUID, Integer>>comparingInt(Map.Entry::getValue)
-                        .reversed()
-                        .thenComparing(entry -> playerName(entry.getKey()), String.CASE_INSENSITIVE_ORDER)
-        );
+        ranking.sort(Comparator.<Map.Entry<UUID, Integer>>comparingInt(Map.Entry::getValue)
+                .reversed().thenComparing(entry -> playerName(entry.getKey()), String.CASE_INSENSITIVE_ORDER));
         return ranking;
     }
 
@@ -467,38 +439,27 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             Bukkit.broadcastMessage(ChatColor.GRAY + "획득 점수가 없습니다.");
             return;
         }
-
         sortedScores().forEach(entry -> Bukkit.broadcastMessage(
-                ChatColor.YELLOW + playerName(entry.getKey())
-                        + ChatColor.WHITE + ": "
+                ChatColor.YELLOW + playerName(entry.getKey()) + ChatColor.WHITE + ": "
                         + ChatColor.AQUA + entry.getValue() + "점"
         ));
     }
 
     private String displayTargetName() {
-        return currentTarget == null ? "" : nameManager.displayName(currentTarget);
+        return currentTarget == null ? "" : resourcePackNames.displayName(currentTarget);
     }
 
     private String actualTargetName() {
-        if (currentTarget == null) return "";
-        String[] words = currentTarget.name().toLowerCase(Locale.ROOT).split("_");
-        StringBuilder result = new StringBuilder();
-        for (String word : words) {
-            if (!result.isEmpty()) result.append(' ');
-            if (!word.isEmpty()) {
-                result.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));
-            }
-        }
-        return result.toString();
+        return currentTarget == null ? "" : koreanNames.displayName(currentTarget);
     }
 
     private void sendUsage(CommandSender sender, String label) {
-        sender.sendMessage(ChatColor.GOLD + "ItemRace 0.5.0 명령어");
+        sender.sendMessage(ChatColor.GOLD + "ItemRace 0.6.0 명령어");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " start" + ChatColor.WHITE + " - 게임 시작");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " stop" + ChatColor.WHITE + " - 게임 종료");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " status" + ChatColor.WHITE + " - 현재 상태 확인");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " score" + ChatColor.WHITE + " - 점수 확인");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " hint [숫자|reveal|reset]" + ChatColor.WHITE + " - 힌트 관리");
-        sender.sendMessage(ChatColor.YELLOW + "/" + label + " reloadpack" + ChatColor.WHITE + " - 리소스팩 이름 다시 읽기");
+        sender.sendMessage(ChatColor.YELLOW + "/" + label + " reloadpack" + ChatColor.WHITE + " - 이름 데이터 다시 읽기");
     }
 }
