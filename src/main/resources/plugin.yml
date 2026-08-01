@@ -1,0 +1,6 @@
+name: ItemRace
+version: ${version}
+main: kr.minq.itemrace.ItemRacePlugin
+api-version: '26.2'
+author: LonelyDawnStar
+description: Random item race plugin for Paper 26.2
