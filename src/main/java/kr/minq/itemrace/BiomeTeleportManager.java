@@ -35,11 +35,9 @@ import java.util.UUID;
 final class BiomeTeleportManager implements Listener {
 
     private static final int DEFAULT_COOLDOWN_SECONDS = 300;
-    // 이전 구현과의 빌드 호환용 상수. 새 코드는 cooldownSeconds를 사용한다.
-    private static final long DEFAULT_COOLDOWN_MILLIS = DEFAULT_COOLDOWN_SECONDS * 1000L;
     private static final long SPECTATOR_MILLIS = 10_000L;
     private static final long SPECTATOR_TICKS = 20L * 10L;
-    private static final int SEARCH_RADIUS = 12_000;
+    private static final int SEARCH_RADIUS = 20_000;
 
     private final ItemRacePlugin plugin;
     private final Map<UUID, Long> cooldownUntil = new HashMap<>();
@@ -164,10 +162,11 @@ final class BiomeTeleportManager implements Listener {
         if (!(event.getInventory().getHolder() instanceof BiomeMenuHolder holder)) return;
         event.setCancelled(true);
         if (!(event.getWhoClicked() instanceof Player player)) return;
-        BiomeOption option = holder.optionsBySlot().get(event.getRawSlot());
+
+        TravelOption option = holder.optionsBySlot().get(event.getRawSlot());
         if (option == null) return;
         player.closeInventory();
-        teleportToBiome(player, option);
+        teleportToOption(player, option);
     }
 
     @EventHandler
@@ -182,90 +181,112 @@ final class BiomeTeleportManager implements Listener {
     }
 
     private void openMenu(Player player) {
-        if (remainingCooldownMillis(player) > 0) {
-            long seconds = (remainingCooldownMillis(player) + 999L) / 1000L;
-            player.sendMessage(ChatColor.RED + "바이옴 텔레포트 쿨타임이 " + formatDuration((int) seconds) + " 남았습니다.");
+        long cooldown = remainingCooldownMillis(player);
+        if (cooldown > 0L) {
+            int seconds = (int) ((cooldown + 999L) / 1000L);
+            player.sendMessage(ChatColor.RED + "바이옴 텔레포트 쿨타임이 " + formatDuration(seconds) + " 남았습니다.");
             return;
         }
 
-        World.Environment environment = player.getWorld().getEnvironment();
-        List<BiomeOption> options;
-        String title;
-        if (environment == World.Environment.NORMAL) {
-            options = overworldOptions();
-            title = "가까운 오버월드 바이옴";
-        } else if (environment == World.Environment.NETHER) {
-            options = netherOptions();
-            title = "가까운 네더 바이옴";
-        } else {
-            player.sendMessage(ChatColor.RED + "엔드에서는 바이옴 텔레포트를 사용할 수 없습니다.");
-            return;
-        }
-
+        List<TravelOption> options = travelOptions();
         BiomeMenuHolder holder = new BiomeMenuHolder();
-        Inventory inventory = Bukkit.createInventory(holder, 27, title);
+        Inventory inventory = Bukkit.createInventory(holder, 54, "바이옴 및 스폰 이동");
         holder.inventory = inventory;
-        int[] slots = {10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25};
-        for (int i = 0; i < options.size() && i < slots.length; i++) {
-            BiomeOption option = options.get(i);
-            int slot = slots[i];
+
+        int slot = 0;
+        for (TravelOption option : options) {
+            if (slot >= inventory.getSize()) break;
             holder.optionsBySlot.put(slot, option);
             inventory.setItem(slot, createMenuItem(option));
+            slot++;
         }
+
         player.openInventory(inventory);
         player.playSound(player.getLocation(), Sound.BLOCK_CHEST_OPEN, 0.7f, 1.2f);
     }
 
-    private ItemStack createMenuItem(BiomeOption option) {
+    private ItemStack createMenuItem(TravelOption option) {
         ItemStack stack = new ItemStack(option.icon());
         ItemMeta meta = stack.getItemMeta();
-        meta.setDisplayName(ChatColor.AQUA + option.displayName());
+        meta.setDisplayName((option.respawnPoint() ? ChatColor.GREEN : ChatColor.AQUA) + option.displayName());
+
         List<String> lore = new ArrayList<>();
-        lore.add(ChatColor.GRAY + "가장 가까운 해당 바이옴으로 이동");
+        if (option.respawnPoint()) {
+            lore.add(ChatColor.GRAY + "침대 또는 리스폰 정박기로 설정한 개인 스폰 지점");
+        } else {
+            lore.add(ChatColor.GRAY + "가장 가까운 해당 바이옴으로 이동");
+            lore.add(ChatColor.DARK_GRAY + "차원: " + environmentName(option.environment()));
+        }
         lore.add(ChatColor.DARK_GRAY + "쿨타임 " + formatDuration(cooldownSeconds) + " · 이동 후 관전 10초");
         meta.setLore(lore);
         stack.setItemMeta(meta);
         return stack;
     }
 
-    private void teleportToBiome(Player player, BiomeOption option) {
+    private void teleportToOption(Player player, TravelOption option) {
         if (!enabled || !raceActive || !plugin.isItemRaceParticipant(player.getUniqueId())) {
             player.sendMessage(ChatColor.RED + "현재 바이옴 텔레포트를 사용할 수 없습니다.");
             return;
         }
-        if (remainingCooldownMillis(player) > 0) {
+        if (remainingCooldownMillis(player) > 0L) {
             player.sendMessage(ChatColor.RED + "아직 바이옴 텔레포트 쿨타임입니다.");
             return;
         }
-        World world = player.getWorld();
-        if (world.getEnvironment() != option.environment()) {
-            player.sendMessage(ChatColor.RED + "현재 차원과 선택한 바이옴의 차원이 다릅니다.");
+
+        if (option.respawnPoint()) {
+            Location respawn = player.getRespawnLocation();
+            if (respawn == null) {
+                player.sendMessage(ChatColor.RED + "유효한 개인 스폰 지점이 없습니다. 침대나 리스폰 정박기로 먼저 설정하세요.");
+                return;
+            }
+            performTeleport(player, respawn.clone(), "내 스폰 지점");
             return;
         }
 
-        player.sendMessage(ChatColor.YELLOW + option.displayName() + " 바이옴을 찾는 중입니다. 잠시 멈출 수 있습니다.");
-        BiomeSearchResult result = world.locateNearestBiome(player.getLocation(), SEARCH_RADIUS, 32, 64, option.biome());
+        World targetWorld = findWorld(option.environment());
+        if (targetWorld == null) {
+            player.sendMessage(ChatColor.RED + environmentName(option.environment()) + " 월드를 찾지 못했습니다.");
+            return;
+        }
+
+        Location origin = createSearchOrigin(player, targetWorld);
+        player.sendMessage(ChatColor.YELLOW + option.displayName() + "을(를) 찾는 중입니다. 잠시 멈출 수 있습니다.");
+
+        BiomeSearchResult result = targetWorld.locateNearestBiome(
+                origin,
+                SEARCH_RADIUS,
+                32,
+                64,
+                option.biome()
+        );
         if (result == null) {
             player.sendMessage(ChatColor.RED + "반경 " + SEARCH_RADIUS + "블록 안에서 해당 바이옴을 찾지 못했습니다.");
             return;
         }
-        Location target = findSafeLocation(world, result.getLocation());
+
+        Location target = findSafeLocation(targetWorld, result.getLocation());
         if (target == null) {
             player.sendMessage(ChatColor.RED + "해당 바이옴에서 안전한 이동 위치를 찾지 못했습니다.");
             return;
         }
+        performTeleport(player, target, option.displayName());
+    }
 
+    private void performTeleport(Player player, Location target, String destinationName) {
         UUID uuid = player.getUniqueId();
         long now = System.currentTimeMillis();
+
+        // 설정된 값을 그대로 사용한다. 기본 5분 상수로 되돌리지 않는다.
         cooldownUntil.put(uuid, now + cooldownSeconds * 1000L);
         spectatorUntil.put(uuid, now + SPECTATOR_MILLIS);
         previousModes.put(uuid, player.getGameMode());
+
         BukkitTask old = restoreTasks.remove(uuid);
         if (old != null) old.cancel();
 
         player.teleport(target);
         player.setGameMode(GameMode.SPECTATOR);
-        player.sendMessage(ChatColor.GREEN + option.displayName() + " 바이옴으로 이동했습니다. 10초 동안 관전 모드입니다.");
+        player.sendMessage(ChatColor.GREEN + destinationName + "으로 이동했습니다. 10초 동안 관전 모드입니다.");
         player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.0f);
         updateStatusBars();
 
@@ -281,6 +302,36 @@ final class BiomeTeleportManager implements Listener {
             updateStatusBars();
         }, SPECTATOR_TICKS);
         restoreTasks.put(uuid, restore);
+    }
+
+    private World findWorld(World.Environment environment) {
+        for (World world : Bukkit.getWorlds()) {
+            if (world.getEnvironment() == environment) return world;
+        }
+        return null;
+    }
+
+    private Location createSearchOrigin(Player player, World targetWorld) {
+        Location current = player.getLocation();
+        if (current.getWorld() == targetWorld) return current;
+
+        double x = current.getX();
+        double z = current.getZ();
+        World.Environment currentEnvironment = current.getWorld().getEnvironment();
+        World.Environment targetEnvironment = targetWorld.getEnvironment();
+
+        if (currentEnvironment == World.Environment.NORMAL && targetEnvironment == World.Environment.NETHER) {
+            x /= 8.0;
+            z /= 8.0;
+        } else if (currentEnvironment == World.Environment.NETHER && targetEnvironment == World.Environment.NORMAL) {
+            x *= 8.0;
+            z *= 8.0;
+        } else {
+            x = targetWorld.getSpawnLocation().getX();
+            z = targetWorld.getSpawnLocation().getZ();
+        }
+
+        return new Location(targetWorld, x, targetWorld.getSpawnLocation().getY(), z);
     }
 
     private void updateStatusBars() {
@@ -301,6 +352,7 @@ final class BiomeTeleportManager implements Listener {
             bar.progress(Math.max(0.0f, Math.min(1.0f, spectatorLeft / (float) SPECTATOR_MILLIS)));
             return;
         }
+
         long cooldownLeft = remainingCooldownMillis(player);
         if (cooldownLeft > 0L) {
             int seconds = (int) ((cooldownLeft + 999L) / 1000L);
@@ -315,7 +367,12 @@ final class BiomeTeleportManager implements Listener {
     }
 
     private BossBar createStatusBar() {
-        return BossBar.bossBar(Component.text("바이옴 TP · 사용 가능 (Shift+F)"), 1.0f, BossBar.Color.BLUE, BossBar.Overlay.PROGRESS);
+        return BossBar.bossBar(
+                Component.text("바이옴 TP · 사용 가능 (Shift+F)"),
+                1.0f,
+                BossBar.Color.BLUE,
+                BossBar.Overlay.PROGRESS
+        );
     }
 
     private void restoreAllPlayers() {
@@ -331,10 +388,12 @@ final class BiomeTeleportManager implements Listener {
     private Location findSafeLocation(World world, Location found) {
         int x = found.getBlockX();
         int z = found.getBlockZ();
+
         if (world.getEnvironment() == World.Environment.NORMAL) {
             int y = world.getHighestBlockYAt(x, z) + 1;
             Location location = new Location(world, x + 0.5, y, z + 0.5);
             if (isSafe(location)) return location;
+
             for (int radius = 1; radius <= 8; radius++) {
                 for (int dx = -radius; dx <= radius; dx++) {
                     for (int dz = -radius; dz <= radius; dz++) {
@@ -346,6 +405,7 @@ final class BiomeTeleportManager implements Listener {
             }
             return null;
         }
+
         int centerY = Math.max(world.getMinHeight() + 2, Math.min(world.getMaxHeight() - 3, found.getBlockY()));
         for (int distance = 0; distance < world.getMaxHeight(); distance++) {
             int[] candidates = {centerY + distance, centerY - distance};
@@ -362,7 +422,10 @@ final class BiomeTeleportManager implements Listener {
         Block feet = location.getBlock();
         Block head = feet.getRelative(0, 1, 0);
         Block ground = feet.getRelative(0, -1, 0);
-        return feet.isPassable() && head.isPassable() && ground.getType().isSolid() && ground.getType() != Material.MAGMA_BLOCK;
+        return feet.isPassable()
+                && head.isPassable()
+                && ground.getType().isSolid()
+                && ground.getType() != Material.MAGMA_BLOCK;
     }
 
     private long remainingCooldownMillis(Player player) {
@@ -375,39 +438,57 @@ final class BiomeTeleportManager implements Listener {
         return minutes > 0 ? minutes + "분 " + seconds + "초" : seconds + "초";
     }
 
-    private List<BiomeOption> overworldOptions() {
+    private String environmentName(World.Environment environment) {
+        return environment == World.Environment.NETHER ? "네더" : "오버월드";
+    }
+
+    private List<TravelOption> travelOptions() {
         return List.of(
-                new BiomeOption("평원", Biome.PLAINS, Material.GRASS_BLOCK, World.Environment.NORMAL),
-                new BiomeOption("사막", Biome.DESERT, Material.SAND, World.Environment.NORMAL),
-                new BiomeOption("정글", Biome.JUNGLE, Material.JUNGLE_LOG, World.Environment.NORMAL),
-                new BiomeOption("대나무 정글", Biome.BAMBOO_JUNGLE, Material.BAMBOO, World.Environment.NORMAL),
-                new BiomeOption("늪", Biome.SWAMP, Material.LILY_PAD, World.Environment.NORMAL),
-                new BiomeOption("맹그로브 늪", Biome.MANGROVE_SWAMP, Material.MANGROVE_LOG, World.Environment.NORMAL),
-                new BiomeOption("벚나무 숲", Biome.CHERRY_GROVE, Material.CHERRY_LOG, World.Environment.NORMAL),
-                new BiomeOption("악지", Biome.BADLANDS, Material.RED_SAND, World.Environment.NORMAL),
-                new BiomeOption("눈 덮인 평원", Biome.SNOWY_PLAINS, Material.SNOW_BLOCK, World.Environment.NORMAL),
-                new BiomeOption("버섯 들판", Biome.MUSHROOM_FIELDS, Material.RED_MUSHROOM_BLOCK, World.Environment.NORMAL),
-                new BiomeOption("따뜻한 바다", Biome.WARM_OCEAN, Material.TUBE_CORAL_BLOCK, World.Environment.NORMAL),
-                new BiomeOption("깊은 어둠", Biome.DEEP_DARK, Material.SCULK, World.Environment.NORMAL)
+                new TravelOption("내 스폰 지점", null, Material.RED_BED, null, true),
+
+                new TravelOption("참나무 숲", Biome.FOREST, Material.OAK_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("자작나무 숲", Biome.BIRCH_FOREST, Material.BIRCH_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("정글나무 숲", Biome.JUNGLE, Material.JUNGLE_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("가문비나무 숲", Biome.TAIGA, Material.SPRUCE_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("아카시아 지역", Biome.SAVANNA, Material.ACACIA_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("사막 지역", Biome.DESERT, Material.CACTUS, World.Environment.NORMAL, false),
+                new TravelOption("메사 지역", Biome.BADLANDS, Material.RED_SAND, World.Environment.NORMAL, false),
+                new TravelOption("짙은 참나무 지역", Biome.DARK_FOREST, Material.DARK_OAK_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("맹그로브나무 지역", Biome.MANGROVE_SWAMP, Material.MANGROVE_PROPAGULE, World.Environment.NORMAL, false),
+                new TravelOption("벚꽃나무 지역", Biome.CHERRY_GROVE, Material.CHERRY_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("평원", Biome.PLAINS, Material.GRASS_BLOCK, World.Environment.NORMAL, false),
+                new TravelOption("창백한 나무 지역", Biome.PALE_GARDEN, Material.PALE_OAK_SAPLING, World.Environment.NORMAL, false),
+                new TravelOption("눈 덮인 평원", Biome.SNOWY_PLAINS, Material.SNOW_BLOCK, World.Environment.NORMAL, false),
+                new TravelOption("얼음 첨탑 지역", Biome.ICE_SPIKES, Material.PACKED_ICE, World.Environment.NORMAL, false),
+
+                new TravelOption("네더 황무지", Biome.NETHER_WASTES, Material.NETHERRACK, World.Environment.NETHER, false),
+                new TravelOption("진홍빛 숲", Biome.CRIMSON_FOREST, Material.CRIMSON_NYLIUM, World.Environment.NETHER, false),
+                new TravelOption("뒤틀린 숲", Biome.WARPED_FOREST, Material.WARPED_NYLIUM, World.Environment.NETHER, false),
+                new TravelOption("영혼 모래 골짜기", Biome.SOUL_SAND_VALLEY, Material.SOUL_SAND, World.Environment.NETHER, false),
+                new TravelOption("현무암 삼각주", Biome.BASALT_DELTAS, Material.BASALT, World.Environment.NETHER, false)
         );
     }
 
-    private List<BiomeOption> netherOptions() {
-        return List.of(
-                new BiomeOption("네더 황무지", Biome.NETHER_WASTES, Material.NETHERRACK, World.Environment.NETHER),
-                new BiomeOption("진홍빛 숲", Biome.CRIMSON_FOREST, Material.CRIMSON_STEM, World.Environment.NETHER),
-                new BiomeOption("뒤틀린 숲", Biome.WARPED_FOREST, Material.WARPED_STEM, World.Environment.NETHER),
-                new BiomeOption("영혼 모래 골짜기", Biome.SOUL_SAND_VALLEY, Material.SOUL_SAND, World.Environment.NETHER),
-                new BiomeOption("현무암 삼각주", Biome.BASALT_DELTAS, Material.BASALT, World.Environment.NETHER)
-        );
+    private record TravelOption(
+            String displayName,
+            Biome biome,
+            Material icon,
+            World.Environment environment,
+            boolean respawnPoint
+    ) {
     }
-
-    private record BiomeOption(String displayName, Biome biome, Material icon, World.Environment environment) {}
 
     private static final class BiomeMenuHolder implements InventoryHolder {
-        private final Map<Integer, BiomeOption> optionsBySlot = new HashMap<>();
+        private final Map<Integer, TravelOption> optionsBySlot = new HashMap<>();
         private Inventory inventory;
-        Map<Integer, BiomeOption> optionsBySlot() { return optionsBySlot; }
-        @Override public Inventory getInventory() { return inventory; }
+
+        Map<Integer, TravelOption> optionsBySlot() {
+            return optionsBySlot;
+        }
+
+        @Override
+        public Inventory getInventory() {
+            return inventory;
+        }
     }
 }
