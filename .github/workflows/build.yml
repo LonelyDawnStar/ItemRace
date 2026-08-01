@@ -34,6 +34,9 @@ jobs:
         with:
           gradle-version: '9.1.0'
 
+      - name: Add night vision feature
+        run: python3 scripts/patch_night_vision.py
+
       - name: Build plugin
         run: gradle clean build --stacktrace
 
