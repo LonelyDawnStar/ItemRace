@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "kr.minq"
-version = "0.4.0"
+version = "0.5.0"
 
 repositories {
     mavenCentral()
@@ -15,6 +15,7 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:26.2.build.87-stable")
+    compileOnly("com.google.code.gson:gson:2.11.0")
 }
 
 java {
