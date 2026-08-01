@@ -1,5 +1,7 @@
 package kr.minq.itemrace;
 
+import net.kyori.adventure.bossbar.BossBar;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.GameMode;
@@ -32,16 +34,22 @@ import java.util.UUID;
 
 final class BiomeTeleportManager implements Listener {
 
-    private static final long COOLDOWN_MILLIS = 5L * 60L * 1000L;
+    private static final int DEFAULT_COOLDOWN_SECONDS = 300;
+    private static final long SPECTATOR_MILLIS = 10_000L;
     private static final long SPECTATOR_TICKS = 20L * 10L;
     private static final int SEARCH_RADIUS = 12_000;
 
     private final ItemRacePlugin plugin;
     private final Map<UUID, Long> cooldownUntil = new HashMap<>();
+    private final Map<UUID, Long> spectatorUntil = new HashMap<>();
     private final Map<UUID, BukkitTask> restoreTasks = new HashMap<>();
     private final Map<UUID, GameMode> previousModes = new HashMap<>();
+    private final Map<UUID, BossBar> statusBars = new HashMap<>();
+
     private boolean enabled;
     private boolean raceActive;
+    private int cooldownSeconds = DEFAULT_COOLDOWN_SECONDS;
+    private BukkitTask barUpdateTask;
 
     BiomeTeleportManager(ItemRacePlugin plugin) {
         this.plugin = plugin;
@@ -50,6 +58,7 @@ final class BiomeTeleportManager implements Listener {
     void register() {
         PluginManager manager = plugin.getServer().getPluginManager();
         manager.registerEvents(this, plugin);
+        barUpdateTask = Bukkit.getScheduler().runTaskTimer(plugin, this::updateStatusBars, 0L, 20L);
     }
 
     boolean toggle(CommandSender sender) {
@@ -64,19 +73,78 @@ final class BiomeTeleportManager implements Listener {
         return true;
     }
 
-    void setRaceActive(boolean raceActive) {
-        this.raceActive = raceActive;
+    boolean setCooldown(CommandSender sender, String[] args) {
+        if (raceActive) {
+            sender.sendMessage(ChatColor.RED + "바이옴 TP 쿨타임은 레이스 시작 전에만 설정할 수 있습니다.");
+            return true;
+        }
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "현재 바이옴 TP 쿨타임: " + formatDuration(cooldownSeconds));
+            sender.sendMessage(ChatColor.GRAY + "설정: /ir biometpcooldown <초|reset>");
+            return true;
+        }
+        if (args[1].equalsIgnoreCase("reset")) {
+            cooldownSeconds = DEFAULT_COOLDOWN_SECONDS;
+            sender.sendMessage(ChatColor.GREEN + "바이옴 TP 쿨타임을 기본값 5분으로 초기화했습니다.");
+            return true;
+        }
+        try {
+            int seconds = Integer.parseInt(args[1]);
+            if (seconds < 1 || seconds > 86_400) {
+                sender.sendMessage(ChatColor.RED + "쿨타임은 1~86400초 사이로 입력하세요.");
+                return true;
+            }
+            cooldownSeconds = seconds;
+            sender.sendMessage(ChatColor.GREEN + "바이옴 TP 쿨타임을 " + formatDuration(seconds) + "으로 설정했습니다.");
+        } catch (NumberFormatException exception) {
+            sender.sendMessage(ChatColor.RED + "사용법: /ir biometpcooldown <초|reset>");
+        }
+        return true;
+    }
+
+    void setRaceActive(boolean active) {
+        raceActive = active;
+        if (!active) {
+            restoreAllPlayers();
+            hideStatusBars();
+            cooldownUntil.clear();
+            spectatorUntil.clear();
+        }
     }
 
     boolean isEnabled() {
         return enabled;
     }
 
+    int getCooldownSeconds() {
+        return cooldownSeconds;
+    }
+
+    void showStatusBars() {
+        if (!enabled || !raceActive) return;
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (!plugin.isItemRaceParticipant(player.getUniqueId())) continue;
+            BossBar bar = statusBars.computeIfAbsent(player.getUniqueId(), ignored -> createStatusBar());
+            player.hideBossBar(bar);
+            updateStatusBar(player, bar);
+            player.showBossBar(bar);
+        }
+    }
+
+    void hideStatusBars() {
+        for (Map.Entry<UUID, BossBar> entry : statusBars.entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player != null) player.hideBossBar(entry.getValue());
+        }
+    }
+
     void disable() {
-        for (BukkitTask task : restoreTasks.values()) task.cancel();
-        restoreTasks.clear();
-        previousModes.clear();
+        if (barUpdateTask != null) barUpdateTask.cancel();
+        restoreAllPlayers();
+        hideStatusBars();
+        statusBars.clear();
         cooldownUntil.clear();
+        spectatorUntil.clear();
         raceActive = false;
     }
 
@@ -108,12 +176,15 @@ final class BiomeTeleportManager implements Listener {
         BukkitTask task = restoreTasks.remove(uuid);
         if (task != null) task.cancel();
         previousModes.remove(uuid);
+        spectatorUntil.remove(uuid);
+        BossBar bar = statusBars.remove(uuid);
+        if (bar != null) event.getPlayer().hideBossBar(bar);
     }
 
     private void openMenu(Player player) {
         if (remainingCooldownMillis(player) > 0) {
             long seconds = (remainingCooldownMillis(player) + 999L) / 1000L;
-            player.sendMessage(ChatColor.RED + "바이옴 텔레포트 쿨타임이 " + seconds + "초 남았습니다.");
+            player.sendMessage(ChatColor.RED + "바이옴 텔레포트 쿨타임이 " + formatDuration((int) seconds) + " 남았습니다.");
             return;
         }
 
@@ -152,7 +223,7 @@ final class BiomeTeleportManager implements Listener {
         meta.setDisplayName(ChatColor.AQUA + option.displayName());
         List<String> lore = new ArrayList<>();
         lore.add(ChatColor.GRAY + "가장 가까운 해당 바이옴으로 이동");
-        lore.add(ChatColor.DARK_GRAY + "쿨타임 5분 · 이동 후 관전 10초");
+        lore.add(ChatColor.DARK_GRAY + "쿨타임 " + formatDuration(cooldownSeconds) + " · 이동 후 관전 10초");
         meta.setLore(lore);
         stack.setItemMeta(meta);
         return stack;
@@ -190,7 +261,9 @@ final class BiomeTeleportManager implements Listener {
         }
 
         UUID uuid = player.getUniqueId();
-        cooldownUntil.put(uuid, System.currentTimeMillis() + COOLDOWN_MILLIS);
+        long now = System.currentTimeMillis();
+        cooldownUntil.put(uuid, now + cooldownSeconds * 1000L);
+        spectatorUntil.put(uuid, now + SPECTATOR_MILLIS);
         GameMode previous = player.getGameMode();
         previousModes.put(uuid, previous);
         BukkitTask old = restoreTasks.remove(uuid);
@@ -200,17 +273,72 @@ final class BiomeTeleportManager implements Listener {
         player.setGameMode(GameMode.SPECTATOR);
         player.sendMessage(ChatColor.GREEN + option.displayName() + " 바이옴으로 이동했습니다. 10초 동안 관전 모드입니다.");
         player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.0f);
+        updateStatusBars();
 
         BukkitTask restore = Bukkit.getScheduler().runTaskLater(plugin, () -> {
             restoreTasks.remove(uuid);
+            spectatorUntil.remove(uuid);
             GameMode restoreMode = previousModes.remove(uuid);
             Player online = Bukkit.getPlayer(uuid);
             if (online != null && online.isOnline()) {
                 online.setGameMode(restoreMode == null ? GameMode.SURVIVAL : restoreMode);
                 online.sendMessage(ChatColor.GREEN + "관전 시간이 끝나 원래 게임 모드로 돌아왔습니다.");
             }
+            updateStatusBars();
         }, SPECTATOR_TICKS);
         restoreTasks.put(uuid, restore);
+    }
+
+    private void updateStatusBars() {
+        if (!enabled || !raceActive) return;
+        for (Map.Entry<UUID, BossBar> entry : statusBars.entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null || !player.isOnline()) continue;
+            updateStatusBar(player, entry.getValue());
+        }
+    }
+
+    private void updateStatusBar(Player player, BossBar bar) {
+        long now = System.currentTimeMillis();
+        long spectatorLeft = Math.max(0L, spectatorUntil.getOrDefault(player.getUniqueId(), 0L) - now);
+        if (spectatorLeft > 0L) {
+            int seconds = (int) ((spectatorLeft + 999L) / 1000L);
+            bar.name(Component.text("바이옴 TP · 관전모드 " + seconds + "초"));
+            bar.color(BossBar.Color.GREEN);
+            bar.progress(Math.max(0.0f, Math.min(1.0f, spectatorLeft / (float) SPECTATOR_MILLIS)));
+            return;
+        }
+
+        long cooldownLeft = remainingCooldownMillis(player);
+        if (cooldownLeft > 0L) {
+            int seconds = (int) ((cooldownLeft + 999L) / 1000L);
+            bar.name(Component.text("바이옴 TP · 쿨타임 " + formatDuration(seconds)));
+            bar.color(BossBar.Color.PURPLE);
+            bar.progress(Math.max(0.0f, Math.min(1.0f, cooldownLeft / (float) (cooldownSeconds * 1000L))));
+        } else {
+            bar.name(Component.text("바이옴 TP · 사용 가능 (Shift+F)"));
+            bar.color(BossBar.Color.BLUE);
+            bar.progress(1.0f);
+        }
+    }
+
+    private BossBar createStatusBar() {
+        return BossBar.bossBar(
+                Component.text("바이옴 TP · 사용 가능 (Shift+F)"),
+                1.0f,
+                BossBar.Color.BLUE,
+                BossBar.Overlay.PROGRESS
+        );
+    }
+
+    private void restoreAllPlayers() {
+        for (BukkitTask task : restoreTasks.values()) task.cancel();
+        restoreTasks.clear();
+        for (Map.Entry<UUID, GameMode> entry : previousModes.entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player != null && player.isOnline()) player.setGameMode(entry.getValue());
+        }
+        previousModes.clear();
     }
 
     private Location findSafeLocation(World world, Location found) {
@@ -255,6 +383,12 @@ final class BiomeTeleportManager implements Listener {
 
     private long remainingCooldownMillis(Player player) {
         return Math.max(0L, cooldownUntil.getOrDefault(player.getUniqueId(), 0L) - System.currentTimeMillis());
+    }
+
+    private String formatDuration(int totalSeconds) {
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        return minutes > 0 ? String.format("%d:%02d", minutes, seconds) : seconds + "초";
     }
 
     private List<BiomeOption> overworldOptions() {
