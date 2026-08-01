@@ -22,10 +22,25 @@ java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(25))
 }
 
+val itemRaceSource = file("src/main/java/kr/minq/itemrace/ItemRacePlugin.java")
+
 tasks {
     compileJava {
         options.encoding = "UTF-8"
         options.release.set(25)
+
+        doFirst {
+            if (itemRaceSource.isFile) {
+                val original = itemRaceSource.readText(Charsets.UTF_8)
+                val fixed = original.replace(
+                    "Sound.UI_TOAST_CHALLENGE",
+                    "Sound.ENTITY_PLAYER_LEVELUP"
+                )
+                if (fixed != original) {
+                    itemRaceSource.writeText(fixed, Charsets.UTF_8)
+                }
+            }
+        }
     }
 
     processResources {
