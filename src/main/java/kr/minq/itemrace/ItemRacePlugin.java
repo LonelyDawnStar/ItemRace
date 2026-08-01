@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor {
 
@@ -46,9 +47,16 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
     private boolean running;
     private boolean resolvingRound;
     private Material currentTarget;
+
+    // 0이면 제한 없음. 서버 시작 후 명령어로 설정한다.
+    private int goalScore;
+    private int roundTimeSeconds;
+    private int remainingRoundSeconds;
+
     private BukkitTask inventoryScanner;
     private BukkitTask hintDisplayTask;
     private BukkitTask roundIntroTask;
+    private BukkitTask roundTimerTask;
     private BossBar targetBossBar;
     private ResourcePackNameManager resourcePackNames;
     private KoreanNameManager koreanNames;
@@ -75,7 +83,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         command.setExecutor(this);
         inventoryScanner = Bukkit.getScheduler().runTaskTimer(this, this::scanInventories, 5L, 5L);
         hintDisplayTask = Bukkit.getScheduler().runTaskTimer(this, this::sendHintToParticipants, 10L, 10L);
-        getLogger().info("ItemRace 0.7.0 enabled successfully. Selectable items: " + selectableMaterials.size());
+        getLogger().info("ItemRace 0.8.0 enabled successfully. Selectable items: " + selectableMaterials.size());
     }
 
     @Override
@@ -83,6 +91,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         if (inventoryScanner != null) inventoryScanner.cancel();
         if (hintDisplayTask != null) hintDisplayTask.cancel();
         cancelRoundIntroTask();
+        cancelRoundTimer();
         clearGameUi();
         running = false;
         resolvingRound = false;
@@ -105,6 +114,8 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             case "start" -> startGame(sender);
             case "stop" -> stopGame(sender);
             case "skip", "next" -> skipRound(sender);
+            case "goal" -> setGoalScore(sender, args);
+            case "time", "timer" -> setRoundTime(sender, args);
             case "status" -> showStatus(sender);
             case "score", "scores" -> showScores(sender);
             case "hint" -> handleHint(sender, args);
@@ -114,6 +125,64 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
                 yield true;
             }
         };
+    }
+
+    private boolean setGoalScore(CommandSender sender, String[] args) {
+        if (running) {
+            sender.sendMessage(ChatColor.RED + "목표 점수는 레이스 시작 전에만 설정할 수 있습니다.");
+            return true;
+        }
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "현재 목표 점수: " + formatLimit(goalScore, "점"));
+            sender.sendMessage(ChatColor.GRAY + "설정: /ir goal <점수|off>");
+            return true;
+        }
+
+        Integer value = parseLimitValue(args[1]);
+        if (value == null) {
+            sender.sendMessage(ChatColor.RED + "점수는 1 이상의 정수 또는 off로 입력하세요.");
+            return true;
+        }
+        goalScore = value;
+        sender.sendMessage(goalScore == 0
+                ? ChatColor.GREEN + "목표 점수를 해제했습니다. 점수 제한 없이 진행합니다."
+                : ChatColor.GREEN + "목표 점수를 " + goalScore + "점으로 설정했습니다.");
+        return true;
+    }
+
+    private boolean setRoundTime(CommandSender sender, String[] args) {
+        if (running) {
+            sender.sendMessage(ChatColor.RED + "제한시간은 레이스 시작 전에만 설정할 수 있습니다.");
+            return true;
+        }
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "현재 문제 제한시간: " + formatLimit(roundTimeSeconds, "초"));
+            sender.sendMessage(ChatColor.GRAY + "설정: /ir time <초|off>");
+            return true;
+        }
+
+        Integer value = parseLimitValue(args[1]);
+        if (value == null) {
+            sender.sendMessage(ChatColor.RED + "시간은 1 이상의 정수(초) 또는 off로 입력하세요.");
+            return true;
+        }
+        roundTimeSeconds = value;
+        sender.sendMessage(roundTimeSeconds == 0
+                ? ChatColor.GREEN + "문제 제한시간을 해제했습니다. 시간 제한 없이 진행합니다."
+                : ChatColor.GREEN + "문제 제한시간을 " + roundTimeSeconds + "초로 설정했습니다.");
+        return true;
+    }
+
+    private Integer parseLimitValue(String input) {
+        if (input.equalsIgnoreCase("off") || input.equalsIgnoreCase("none") || input.equals("0")) {
+            return 0;
+        }
+        try {
+            int value = Integer.parseInt(input);
+            return value >= 1 ? value : null;
+        } catch (NumberFormatException exception) {
+            return null;
+        }
     }
 
     private boolean startGame(CommandSender sender) {
@@ -145,6 +214,9 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         updateScoreboards();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[ItemRace] " + ChatColor.YELLOW + "게임이 시작되었습니다!");
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[ItemRace] " + ChatColor.WHITE + "목표 점수: "
+                + ChatColor.AQUA + formatLimit(goalScore, "점") + ChatColor.GRAY + " / 문제 제한시간: "
+                + ChatColor.AQUA + formatLimit(roundTimeSeconds, "초"));
         showRoundIntro("첫 번째 목표");
         return true;
     }
@@ -154,17 +226,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             sender.sendMessage(ChatColor.RED + "현재 진행 중인 ItemRace가 없습니다.");
             return true;
         }
-
-        cancelRoundIntroTask();
-        running = false;
-        resolvingRound = false;
-        currentTarget = null;
-        roundBaselines.clear();
-        revealedHintIndexes.clear();
-        clearGameUi();
-        Bukkit.broadcastMessage(ChatColor.GOLD + "[ItemRace] " + ChatColor.RED + "게임이 종료되었습니다.");
-        broadcastScores();
-        participants.clear();
+        finishGame(null, "관리자가 게임을 종료했습니다.");
         return true;
     }
 
@@ -177,6 +239,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         String skippedDisplayName = displayTargetName();
         String skippedActualName = actualTargetName();
         cancelRoundIntroTask();
+        cancelRoundTimer();
         resolvingRound = true;
         hideTargetBossBar();
 
@@ -191,13 +254,17 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
     }
 
     private boolean showStatus(CommandSender sender) {
-        if (!running || currentTarget == null) {
-            sender.sendMessage(ChatColor.YELLOW + "ItemRace 상태: " + ChatColor.RED + "중지됨");
-            return true;
+        sender.sendMessage(ChatColor.YELLOW + "ItemRace 상태: "
+                + (running ? ChatColor.GREEN + "진행 중" : ChatColor.RED + "중지됨"));
+        sender.sendMessage(ChatColor.YELLOW + "목표 점수: " + ChatColor.AQUA + formatLimit(goalScore, "점"));
+        sender.sendMessage(ChatColor.YELLOW + "문제 제한시간: " + ChatColor.AQUA + formatLimit(roundTimeSeconds, "초"));
+        if (running && currentTarget != null) {
+            sender.sendMessage(ChatColor.YELLOW + "현재 목표: " + ChatColor.AQUA + displayTargetName());
+            sender.sendMessage(ChatColor.YELLOW + "현재 힌트: " + ChatColor.WHITE + renderHint());
+            if (roundTimeSeconds > 0 && !resolvingRound) {
+                sender.sendMessage(ChatColor.YELLOW + "남은 시간: " + ChatColor.AQUA + remainingRoundSeconds + "초");
+            }
         }
-        sender.sendMessage(ChatColor.YELLOW + "ItemRace 상태: " + ChatColor.GREEN + "진행 중");
-        sender.sendMessage(ChatColor.YELLOW + "현재 목표: " + ChatColor.AQUA + displayTargetName());
-        sender.sendMessage(ChatColor.YELLOW + "현재 힌트: " + ChatColor.WHITE + renderHint());
         return true;
     }
 
@@ -284,6 +351,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
 
     private void completeRound(Player winner) {
         resolvingRound = true;
+        cancelRoundTimer();
         hideTargetBossBar();
         int score = scores.merge(winner.getUniqueId(), 1, Integer::sum);
         String displayedName = displayTargetName();
@@ -298,11 +366,40 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[ItemRace] " + ChatColor.WHITE + winner.getName()
                 + "의 현재 점수: " + ChatColor.AQUA + score + "점");
 
+        if (goalScore > 0 && score >= goalScore) {
+            finishGame(winner, winner.getName() + "님이 목표 점수에 도달했습니다!");
+            return;
+        }
+
         Bukkit.getScheduler().runTaskLater(this, () -> {
             if (!running) return;
             chooseNextTarget();
             showRoundIntro("다음 목표");
         }, 40L);
+    }
+
+    private void finishGame(Player winner, String reason) {
+        cancelRoundIntroTask();
+        cancelRoundTimer();
+        running = false;
+        resolvingRound = false;
+        currentTarget = null;
+        roundBaselines.clear();
+        revealedHintIndexes.clear();
+        clearGameUi();
+
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[ItemRace] " + ChatColor.RED + reason);
+        broadcastScores();
+
+        if (winner != null) {
+            Title victoryTitle = Title.title(
+                    Component.text("우승: " + winner.getName()),
+                    Component.text(scores.getOrDefault(winner.getUniqueId(), 0) + "점 달성"),
+                    Title.Times.times(Duration.ofMillis(300), Duration.ofMillis(2500), Duration.ofMillis(700))
+            );
+            forEachParticipant(player -> player.showTitle(victoryTitle));
+        }
+        participants.clear();
     }
 
     private void chooseNextTarget() {
@@ -321,6 +418,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
 
     private void showRoundIntro(String subtitleText) {
         cancelRoundIntroTask();
+        cancelRoundTimer();
         resolvingRound = true;
         hideTargetBossBar();
         updateBossBarName();
@@ -339,13 +437,61 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             if (!running || currentTarget == null) return;
             showTargetBossBar();
             resolvingRound = false;
+            captureRoundBaselines();
+            startRoundTimer();
+            updateScoreboards();
         }, ROUND_INTRO_TICKS);
+    }
+
+    private void startRoundTimer() {
+        cancelRoundTimer();
+        if (roundTimeSeconds <= 0) {
+            remainingRoundSeconds = 0;
+            return;
+        }
+
+        remainingRoundSeconds = roundTimeSeconds;
+        roundTimerTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            if (!running || resolvingRound || currentTarget == null) return;
+            remainingRoundSeconds--;
+            updateScoreboards();
+            if (remainingRoundSeconds <= 0) {
+                handleRoundTimeout();
+            }
+        }, 20L, 20L);
+    }
+
+    private void handleRoundTimeout() {
+        if (!running || resolvingRound || currentTarget == null) return;
+        resolvingRound = true;
+        cancelRoundTimer();
+        hideTargetBossBar();
+
+        String timedOutDisplayName = displayTargetName();
+        String timedOutActualName = actualTargetName();
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[ItemRace] " + ChatColor.RED + "시간 초과!");
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[ItemRace] " + ChatColor.WHITE + "제시된 이름: "
+                + ChatColor.AQUA + timedOutDisplayName + ChatColor.GRAY + " / 실제 이름: "
+                + ChatColor.AQUA + timedOutActualName);
+
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!running) return;
+            chooseNextTarget();
+            showRoundIntro("시간 초과 후 새 목표");
+        }, 40L);
     }
 
     private void cancelRoundIntroTask() {
         if (roundIntroTask != null) {
             roundIntroTask.cancel();
             roundIntroTask = null;
+        }
+    }
+
+    private void cancelRoundTimer() {
+        if (roundTimerTask != null) {
+            roundTimerTask.cancel();
+            roundTimerTask = null;
         }
     }
 
@@ -406,7 +552,13 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
             objective.setDisplaySlot(DisplaySlot.SIDEBAR);
 
             int line = 15;
-            objective.getScore(ChatColor.YELLOW + "현재 점수").setScore(line--);
+            if (goalScore > 0) {
+                objective.getScore(ChatColor.YELLOW + "목표: " + ChatColor.AQUA + goalScore + "점").setScore(line--);
+            }
+            if (roundTimeSeconds > 0 && running) {
+                String timeText = resolvingRound ? "준비 중" : remainingRoundSeconds + "초";
+                objective.getScore(ChatColor.YELLOW + "남은 시간: " + ChatColor.AQUA + timeText).setScore(line--);
+            }
             objective.getScore(ChatColor.GRAY + "──────────").setScore(line--);
 
             int shown = 0;
@@ -478,7 +630,7 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
         forEachParticipant(player -> player.sendActionBar(hint));
     }
 
-    private void forEachParticipant(java.util.function.Consumer<Player> action) {
+    private void forEachParticipant(Consumer<Player> action) {
         for (UUID uuid : participants) {
             Player player = Bukkit.getPlayer(uuid);
             if (player != null && player.isOnline()) action.accept(player);
@@ -499,6 +651,10 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
 
     private String trimName(String name, int maxLength) {
         return name.length() <= maxLength ? name : name.substring(0, maxLength);
+    }
+
+    private String formatLimit(int value, String suffix) {
+        return value <= 0 ? "없음" : value + suffix;
     }
 
     private void broadcastTarget(String prefix) {
@@ -527,7 +683,9 @@ public final class ItemRacePlugin extends JavaPlugin implements CommandExecutor 
     }
 
     private void sendUsage(CommandSender sender, String label) {
-        sender.sendMessage(ChatColor.GOLD + "ItemRace 0.7.0 명령어");
+        sender.sendMessage(ChatColor.GOLD + "ItemRace 0.8.0 명령어");
+        sender.sendMessage(ChatColor.YELLOW + "/" + label + " goal <점수|off>" + ChatColor.WHITE + " - 시작 전 목표 점수 설정");
+        sender.sendMessage(ChatColor.YELLOW + "/" + label + " time <초|off>" + ChatColor.WHITE + " - 시작 전 문제 제한시간 설정");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " start" + ChatColor.WHITE + " - 게임 시작");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " stop" + ChatColor.WHITE + " - 게임 종료");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " skip" + ChatColor.WHITE + " - 현재 문제 건너뛰기");
