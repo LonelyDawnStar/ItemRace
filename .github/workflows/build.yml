@@ -29,6 +29,9 @@ jobs:
         with:
           gradle-version: '9.1.0'
 
+      - name: Patch biome teleport cooldown
+        run: python3 scripts/patch_biome_cooldown.py
+
       - name: Build plugin
         run: gradle clean build --stacktrace
 
