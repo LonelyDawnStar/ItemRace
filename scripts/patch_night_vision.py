@@ -86,11 +86,11 @@ if "private boolean toggleNightVision(CommandSender sender)" not in source:
             if (player == null || !player.isOnline()) continue;
             player.addPotionEffect(new PotionEffect(
                     PotionEffectType.NIGHT_VISION,
-                    220,
+                    12_000,
                     0,
                     false,
                     false,
-                    true
+                    false
             ), true);
             nightVisionApplied.add(uuid);
         }
